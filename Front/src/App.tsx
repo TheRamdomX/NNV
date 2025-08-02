@@ -1,271 +1,316 @@
-import { useState } from 'react';
+// Frontend: pages/index.tsx (React + estructuras personalizadas con tooltip + datos del modelo + selección de neuronas + neuronas de entrada/salida visibles + info extendida + pesos + conexión a backend)
+
+import { useState, useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from '@/components/ui/select';
 import axios from 'axios';
-import ReactFlow, { Background, Controls, Node, Edge } from 'reactflow';
-import 'reactflow/dist/style.css';
+
+// Axios configurado con el backend en 0.0.0.0:8000
+const api = axios.create({
+  baseURL: 'http://localhost:8000',
+});
 
 interface Layer {
   index: number;
   name: string;
   output_shape?: number[];
   activation?: string | null;
+  type?: string;
+  config?: any;
+  neuron_count?: number;
 }
 
-interface Activation {
-  neuron_index: number;
-  mean_activation: number;
-  status: string;
+interface Neuron {
+  id: string;
+  x: number;
+  y: number;
+  layerIndex: number;
+  neuronIndex: number;
 }
 
-interface PruneResult {
-  layer_index: number;
-  pruned_neurons: number;
-  total_neurons: number;
+interface Connection {
+  source: string;
+  target: string;
+}
+
+interface ModelMetadata {
+  model_name: string;
+  created_at: string;
+  trainable_params: number;
+  non_trainable_params: number;
+  total_params: number;
+}
+
+interface OptimizerInfo {
+  type: string;
+  config: any;
+}
+
+interface ModelInfo {
+  summary: string;
+  layers: Layer[];
+  optimizer: OptimizerInfo;
+  loss: string;
+  metrics: string[];
+  metadata: ModelMetadata;
+  weights: number[][][];
+  biases: number[][];
 }
 
 export default function App() {
   const [modelFile, setModelFile] = useState<File | null>(null);
-  const [dataFile, setDataFile] = useState<File | null>(null);
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [layers, setLayers] = useState<Layer[]>([]);
-  const [selectedLayer, setSelectedLayer] = useState<number | null>(null);
-  const [thresholdLow, setThresholdLow] = useState(0.01);
-  const [thresholdHigh, setThresholdHigh] = useState(0.99);
-  const [activations, setActivations] = useState<Activation[]>([]);
-  const [pruneResults, setPruneResults] = useState<PruneResult[]>([]);
-  const [fileName, setFileName] = useState('model_pruned');
+  const [neurons, setNeurons] = useState<Neuron[]>([]);
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [selectedNeuron, setSelectedNeuron] = useState<Neuron | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
 
   const loadModel = async () => {
     if (!modelFile) return;
-    const form = new FormData(); form.append('file', modelFile);
-    await axios.post('/load_model', form);
+    const form = new FormData();
+    form.append('file', modelFile);
+    await api.post('/load_model', form);
     alert('Modelo cargado');
-    fetchLayers();
+    fetchModelInfo();
   };
 
-  const loadData = async () => {
-    if (!dataFile) return;
-    const form = new FormData(); form.append('file', dataFile);
-    const res = await axios.post('/load_data', form);
-    alert(`Datos cargados: shape ${res.data.shape}`);
+  const fetchModelInfo = async () => {
+    const res = await api.get('/model_info');
+    const info: ModelInfo = res.data;
+    setModelInfo(info);
+    setLayers(info.layers);
   };
 
-  const fetchLayers = async () => {
-    const res = await axios.get('/layers');
-    setLayers(res.data);
-  };
+  const buildNetwork = (layerData: Layer[]) => {
+    if (!svgRef.current) return;
+    const { clientWidth, clientHeight } = svgRef.current;
 
-  const analyze = async () => {
-    if (selectedLayer === null) {
-      alert("Selecciona una capa primero");
-      return;
-    }
-    const res = await axios.post('/activations', {
-      layer_index: selectedLayer,
-      threshold_low: thresholdLow,
-      threshold_high: thresholdHigh,
+    // Espaciado horizontal para todas las capas (Dense, Dropout, etc.)
+    const layerSpacing = clientWidth / (layerData.length + 1);
+
+    const generatedNeurons: Neuron[] = [];
+    const generatedConnections: Connection[] = [];
+
+    // Genera neuronas solo para capas Dense/InputLayer
+    layerData.forEach((layer, layerIdx) => {
+      if (
+        (layer.type === 'Dense' || layer.type === 'InputLayer') &&
+        typeof layer.neuron_count === 'number' &&
+        layer.neuron_count > 0
+      ) {
+        const count = layer.neuron_count;
+        const neuronSpacing = clientHeight / (count + 1);
+
+        for (let i = 0; i < count; i++) {
+          generatedNeurons.push({
+            id: `${layerIdx}-${i}`,
+            x: (layerIdx + 1) * layerSpacing,
+            y: (i + 1) * neuronSpacing,
+            layerIndex: layerIdx,
+            neuronIndex: i,
+          });
+        }
+      }
     });
-    setActivations(res.data);
+
+    // Conexiones solo entre capas Dense/InputLayer consecutivas
+    // Busca los índices absolutos de las capas visualizables
+    const visualLayerIndices = layerData
+      .map((layer, idx) =>
+        (layer.type === 'Dense' || layer.type === 'InputLayer') &&
+        typeof layer.neuron_count === 'number' &&
+        layer.neuron_count > 0
+          ? idx
+          : null
+      )
+      .filter(idx => idx !== null) as number[];
+
+    for (let l = 0; l < visualLayerIndices.length - 1; l++) {
+      const idxA = visualLayerIndices[l];
+      const idxB = visualLayerIndices[l + 1];
+      const countA = layerData[idxA].neuron_count!;
+      const countB = layerData[idxB].neuron_count!;
+      for (let i = 0; i < countA; i++) {
+        for (let j = 0; j < countB; j++) {
+          generatedConnections.push({
+            source: `${idxA}-${i}`,
+            target: `${idxB}-${j}`,
+          });
+        }
+      }
+    }
+
+    setNeurons(generatedNeurons);
+    setConnections(generatedConnections);
+    console.log('Neurons:', generatedNeurons.length, 'Connections:', generatedConnections.length);
   };
 
-  const prune = async () => {
-    const res = await axios.post('/prune', [
-      { layer_index: selectedLayer, threshold_low: thresholdLow }
-    ]);
-    setPruneResults(res.data);
-    alert('Poda completada');
-  };
+  useEffect(() => {
+    if (layers.length > 0) {
+      setTimeout(() => {
+        if (svgRef.current && svgRef.current.clientWidth > 0 && svgRef.current.clientHeight > 0) {
+          buildNetwork(layers);
+        }
+      }, 100); // 100ms suele ser suficiente
+    }
+  }, [layers]);
 
-  const saveModel = async () => {
-    const res = await axios.post('/save_model', null, { params: { file_name: fileName } });
-    alert(res.data.message);
-  };
+  function CustomGraph() {
+    const visibleConnections = selectedNeuron
+      ? connections.filter(conn => conn.source === selectedNeuron.id || conn.target === selectedNeuron.id)
+      : [];
 
-  // --- Grafo de capas ---
-  const nodes: Node[] = layers.map((layer, i) => ({
-    id: String(layer.index),
-    data: { label: `${layer.name}\n${layer.output_shape ? layer.output_shape.join('x') : ''}` },
-    position: { x: 100 * i, y: 0 },
-  }));
-  const edges: Edge[] = layers.slice(1).map((layer, i) => ({
-    id: `e${i}-${i+1}`,
-    source: String(layers[i].index),
-    target: String(layer.index),
-    type: 'smoothstep',
-  }));
+    const inputLayer = Math.min(...neurons.map(n => n.layerIndex));
+    const outputLayer = Math.max(...neurons.map(n => n.layerIndex));
 
-  // --- Tabla de neuronas por capa densa ---
-  const denseLayers = layers.filter(l => l.output_shape && l.output_shape.length > 0 && l.output_shape[l.output_shape.length - 1] > 1);
+    // Capas no Dense ni InputLayer
+    const nonDenseLayers = layers
+      .map((layer, idx) => ({ ...layer, idx }))
+      .filter(layer => layer.type !== 'Dense' && layer.type !== 'InputLayer');
 
-  // --- Grafo de activaciones ---
-  let activationNodes: Node[] = [];
-  let activationEdges: Edge[] = [];
-  if (activations.length > 0 && selectedLayer !== null) {
-    activationNodes = activations.map((a, i) => ({
-      id: String(a.neuron_index),
-      data: { label: `N${a.neuron_index}\n${a.status}` },
-      position: { x: 80 * (i % 10), y: 80 * Math.floor(i / 10) },
-      style: {
-        background: a.status === 'dead' ? '#f87171' : a.status === 'active' ? '#34d399' : '#fbbf24',
-        color: '#222',
-        border: '1px solid #888',
-        borderRadius: 8,
-        width: 60,
-        height: 40,
-        fontSize: 12,
-        textAlign: 'center',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        whiteSpace: 'pre-line',
-      },
-    }));
-    // Opcional: conectar neuronas en secuencia
-    activationEdges = activations.slice(1).map((a, i) => ({
-      id: `an${i}-${i+1}`,
-      source: String(activations[i].neuron_index),
-      target: String(a.neuron_index),
-      type: 'smoothstep',
-    }));
+    // Para calcular la posición X de cada capa
+    const layerSpacing = svgRef.current
+      ? svgRef.current.clientWidth / (layers.length + 1)
+      : 100;
+
+    return (
+      <svg ref={svgRef} width="100%" height="80vh">
+        {/* Rectángulos para capas no Dense */}
+        {nonDenseLayers.map((layer) => {
+          const x = (layer.idx + 1) * layerSpacing - 30;
+          const y = 40;
+          return (
+            <g key={layer.idx}>
+              <rect
+                x={x}
+                y={y}
+                width={60}
+                height={svgRef.current ? svgRef.current.clientHeight - 80 : 200}
+                fill="#ffe4b2"
+                stroke="#b8860b"
+                strokeWidth={2}
+                rx={10}
+                opacity={0.7}
+              />
+              <text
+                x={x + 30}
+                y={y + 30}
+                textAnchor="middle"
+                fontSize="14"
+                fill="#b8860b"
+                fontWeight="bold"
+              >
+                {layer.type}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Conexiones */}
+        {visibleConnections.map((conn, idx) => {
+          const source = neurons.find(n => n.id === conn.source);
+          const target = neurons.find(n => n.id === conn.target);
+          if (!source || !target) return null;
+          return (
+            <line
+              key={idx}
+              x1={source.x}
+              y1={source.y}
+              x2={target.x}
+              y2={target.y}
+              stroke="#999"
+              strokeWidth="1"
+            />
+          );
+        })}
+
+        {/* Neuronas */}
+        {neurons.map((neuron) => (
+          <g key={neuron.id}>
+            <circle
+              cx={neuron.x}
+              cy={neuron.y}
+              r="10"
+              fill={
+                selectedNeuron?.id === neuron.id
+                  ? '#88ccff'
+                  : neuron.layerIndex === inputLayer
+                  ? '#aaffaa'
+                  : neuron.layerIndex === outputLayer
+                  ? '#ffaaaa'
+                  : '#cce5ff'
+              }
+              stroke="#333"
+              onClick={() => setSelectedNeuron(neuron)}
+            />
+            {selectedNeuron?.id === neuron.id && (
+              <text x={neuron.x + 12} y={neuron.y - 12} fontSize="12" fill="#333">
+                Layer {neuron.layerIndex}, N{neuron.neuronIndex}
+              </text>
+            )}
+          </g>
+        ))}
+      </svg>
+    );
   }
 
   return (
-    <div className="grid">
+    <div className="p-4">
       <Card>
         <CardContent>
-          <h2 className="text-xl font-bold mb-2">Carga de Modelo y Datos</h2>
+          <h2 className="text-lg font-bold mb-2">Cargar modelo</h2>
           <Input type="file" onChange={e => setModelFile(e.target.files?.[0] || null)} />
-          <Button onClick={loadModel} className="mt-2">Cargar Modelo</Button>
-          <Input type="file" onChange={e => setDataFile(e.target.files?.[0] || null)} className="mt-4" />
-          <Button onClick={loadData} className="mt-2">Cargar Datos</Button>
+          <Button onClick={loadModel} className="mt-2">Cargar</Button>
         </CardContent>
       </Card>
 
-      {layers.length > 0 && (
-        <Card>
-          <CardContent>
-            <h2 className="text-xl font-bold mb-2">Grafo del Modelo</h2>
-            <div style={{ width: '100%', height: 300, background: '#f9f9f9', borderRadius: 8 }}>
-              <ReactFlow nodes={nodes} edges={edges} fitView>
-                <Background />
-                <Controls />
-              </ReactFlow>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {denseLayers.length > 0 && (
-        <Card>
-          <CardContent>
-            <h2 className="text-xl font-bold mb-2">Neurona a Neurona (por capa densa)</h2>
-            {denseLayers.map(layer => (
-              <div key={layer.index} className="mb-4">
-                <h3 className="font-bold mb-1">{layer.name} ({layer.output_shape?.join('x')})</h3>
-                <div className="overflow-auto max-h-64">
-                  <table className="w-full table-auto">
-                    <thead>
-                      <tr><th>Neurona</th></tr>
-                    </thead>
-                    <tbody>
-                      {Array.from({ length: layer.output_shape ? layer.output_shape[layer.output_shape.length - 1] : 0 }).map((_, i) => (
-                        <tr key={i}>
-                          <td>{i}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+      {modelInfo && (
+        <>
+          <Card className="mt-4">
+            <CardContent>
+              <h2 className="text-lg font-bold mb-2">Visualización de Red Neuronal</h2>
+              <CustomGraph />
+              {selectedNeuron && (
+                <div className="text-sm mt-4 bg-gray-50 p-2 rounded border">
+                  <p><strong>Neurona seleccionada:</strong> Capa {selectedNeuron.layerIndex}, Índice {selectedNeuron.neuronIndex}</p>
+                  {modelInfo.weights?.[selectedNeuron.layerIndex]?.[selectedNeuron.neuronIndex] && (
+                    <>
+                      <p className="mt-1">Pesos: <code>{JSON.stringify(modelInfo.weights[selectedNeuron.layerIndex][selectedNeuron.neuronIndex])}</code></p>
+                      <p>Bias: <code>{modelInfo.biases[selectedNeuron.layerIndex][selectedNeuron.neuronIndex]}</code></p>
+                    </>
+                  )}
                 </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+              )}
+            </CardContent>
+          </Card>
 
-      <Card>
-        <CardContent>
-          <h2 className="text-xl font-bold mb-2">Análisis de Activaciones</h2>
-          <Select onValueChange={value => setSelectedLayer(Number(value))}>
-            <SelectTrigger>
-              <SelectValue placeholder="Selecciona capa" />
-            </SelectTrigger>
-            <SelectContent>
-              {layers.map(l => (
-                <SelectItem key={l.index} value={String(l.index)}>
-                  {l.index} - {l.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <div className="grid grid-cols-2 gap-2 mt-2">
-            <Input type="number" value={thresholdLow} step="0.01" onChange={e => setThresholdLow(parseFloat(e.target.value))} placeholder="Umbral bajo" />
-            <Input type="number" value={thresholdHigh} step="0.01" onChange={e => setThresholdHigh(parseFloat(e.target.value))} placeholder="Umbral alto" />
-          </div>
-          <div className="flex mt-2">
-            <Button onClick={analyze}>Analizar</Button>
-            <Button onClick={prune} variant="secondary">Podar</Button>
-          </div>
-        </CardContent>
-      </Card>
+          <Card className="mt-4">
+            <CardContent>
+              <h2 className="text-lg font-bold mb-2">Detalles del Modelo</h2>
+              <p className="text-sm mb-2">Nombre: <strong>{modelInfo.metadata.model_name}</strong></p>
+              <p className="text-sm mb-2">Parámetros: <strong>{modelInfo.metadata.total_params}</strong> 
+                (<span className="text-green-700">{modelInfo.metadata.trainable_params} entrenables</span>, 
+                <span className="text-gray-700"> {modelInfo.metadata.non_trainable_params} no entrenables</span>)
+              </p>
+              <p className="text-sm mb-2">Función de pérdida: <strong>{modelInfo.loss || 'N/A'}</strong></p>
+              <p className="text-sm mb-2">Optimizador: <strong>{modelInfo.optimizer?.type || 'N/A'}</strong></p>
+              <p className="text-sm mb-4">Métricas: {modelInfo.metrics?.join(', ') || 'N/A'}</p>
 
-      {activations.length > 0 && (
-        <Card>
-          <CardContent>
-            <h2 className="text-xl font-bold mb-2">Resultados de Activaciones</h2>
-            <div className="overflow-auto max-h-64">
-              <table className="w-full table-auto">
-                <thead>
-                  <tr><th>Índice</th><th>Media</th><th>Status</th></tr>
-                </thead>
-                <tbody>
-                  {activations.map(a => (
-                    <tr key={a.neuron_index} className={a.status === 'dead' ? 'opacity-50' : ''}>
-                      <td>{a.neuron_index}</td>
-                      <td>{a.mean_activation.toFixed(4)}</td>
-                      <td>{a.status}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {pruneResults.length > 0 && (
-        <Card>
-          <CardContent>
-            <h2 className="text-xl font-bold mb-2">Resultados de Poda</h2>
-            <ul className="list-disc list-inside">
-              {pruneResults.map(r => (
-                <li key={r.layer_index}>
-                  Capa {r.layer_index}: {r.pruned_neurons} de {r.total_neurons} neuronas podadas.
-                </li>
-              ))}
-            </ul>
-            <div className="flex mt-2">
-              <Input placeholder="Nombre archivo" value={fileName} onChange={e => setFileName(e.target.value)} />
-              <Button onClick={saveModel}>Guardar Modelo</Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Grafo de activaciones al final de la página */}
-      {activationNodes.length > 0 && (
-        <Card>
-          <CardContent>
-            <h2 className="text-xl font-bold mb-2">Grafo de Activaciones (neurona a neurona)</h2>
-            <div style={{ width: '100%', height: 400, background: '#f9f9f9', borderRadius: 8 }}>
-              <ReactFlow nodes={activationNodes} edges={activationEdges} fitView>
-                <Background />
-                <Controls />
-              </ReactFlow>
-            </div>
-          </CardContent>
-        </Card>
+              <ul className="text-sm list-disc pl-5">
+                {modelInfo.layers.map((layer, idx) => (
+                  <li key={idx} className="mb-2">
+                    <strong>{layer.name}</strong> ({layer.type || 'Capa'}): <br />
+                    - Activación: {layer.activation || 'N/A'}<br />
+                    - Salida: {layer.output_shape?.join(', ') || 'N/A'}<br />
+                    - Config: {layer.config ? JSON.stringify(layer.config) : 'N/A'}
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+          </Card>
+        </>
       )}
     </div>
   );
