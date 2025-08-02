@@ -65,6 +65,7 @@ export default function App() {
   const [neurons, setNeurons] = useState<Neuron[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [selectedNeuron, setSelectedNeuron] = useState<Neuron | null>(null);
+  const [hoveredConnection, setHoveredConnection] = useState<{source: string, target: string} | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
   const loadModel = async () => {
@@ -208,21 +209,82 @@ export default function App() {
           );
         })}
 
-        {/* Conexiones */}
+        {/* Solo conexiones de la neurona seleccionada */}
         {visibleConnections.map((conn, idx) => {
           const source = neurons.find(n => n.id === conn.source);
           const target = neurons.find(n => n.id === conn.target);
           if (!source || !target) return null;
+
+          // Extraer índices de capa y neurona
+          const [layerA, neuronA] = source.id.split('-').map(Number);
+          const [layerB, neuronB] = target.id.split('-').map(Number);
+
+          // Keras: weights[layerB] es [input_dim, output_dim]
+          // Para la conexión de la neuronaA (origen, capa anterior) a la neuronaB (destino, capa actual)
+          const weight = modelInfo?.weights?.[layerB]?.[neuronA]?.[neuronB];
+
+          // Escala de gris: 220 (gris claro) a 0 (negro)
+          let gray = 220;
+          if (typeof weight === 'number') {
+            const norm = Math.max(-2, Math.min(2, weight)); // recorta a [-2,2]
+            const absNorm = Math.abs(norm) / 2; // [0,1]
+            gray = Math.round(220 * (1 - absNorm)); // 220 (claro) a 0 (negro)
+          }
+          const color = `rgb(${gray},${gray},${gray})`;
+
+          // Coordenadas para el cuadro del peso
+          const midX = (source.x + target.x) / 2;
+          const midY = (source.y + target.y) / 2 - 8;
+
+          // ¿Está resaltada esta conexión?
+          const isHighlighted =
+            hoveredConnection &&
+            hoveredConnection.source === conn.source &&
+            hoveredConnection.target === conn.target;
+
           return (
-            <line
-              key={idx}
-              x1={source.x}
-              y1={source.y}
-              x2={target.x}
-              y2={target.y}
-              stroke="#999"
-              strokeWidth="1"
-            />
+            <g key={idx}>
+              <line
+                x1={source.x}
+                y1={source.y}
+                x2={target.x}
+                y2={target.y}
+                stroke={isHighlighted ? "#1976d2" : color}
+                strokeWidth={isHighlighted ? 4 : 2}
+                opacity={isHighlighted ? 1 : 0.8}
+                onMouseEnter={() => setHoveredConnection({ source: conn.source, target: conn.target })}
+                onMouseLeave={() => setHoveredConnection(null)}
+                style={{ cursor: 'pointer' }}
+              />
+              {isHighlighted && weight !== undefined && (
+                <>
+                  {/* Cuadro de fondo para el peso */}
+                  <rect
+                    x={midX - 38}
+                    y={midY - 18}
+                    width={76}
+                    height={28}
+                    rx={6}
+                    fill="#fff"
+                    stroke="#1976d2"
+                    strokeWidth={1.5}
+                    opacity={0.95}
+                  />
+                  <text
+                    x={midX}
+                    y={midY}
+                    fontSize="14"
+                    fill="#1976d2"
+                    textAnchor="middle"
+                    alignmentBaseline="middle"
+                    fontWeight="bold"
+                    style={{ userSelect: 'none' }}
+                  >
+                    Peso: {Number(weight).toPrecision(4)}
+                  </text>
+                </>
+              )}
+            </g>
           );
         })}
 
