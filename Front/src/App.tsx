@@ -60,6 +60,7 @@ interface ModelInfo {
 
 export default function App() {
   const [modelFile, setModelFile] = useState<File | null>(null);
+  const [npyFile, setNpyFile] = useState<File | null>(null);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [layers, setLayers] = useState<Layer[]>([]);
   const [neurons, setNeurons] = useState<Neuron[]>([]);
@@ -75,8 +76,15 @@ export default function App() {
     const form = new FormData();
     form.append('file', modelFile);
     await api.post('/load_model', form);
-    // alert('Modelo cargado');
     fetchModelInfo();
+  };
+
+  const uploadNpy = async () => {
+    if (!npyFile) return;
+    const form = new FormData();
+    form.append('npy', npyFile);
+    await api.post('/carga_parametros', form);
+    // Puedes agregar lógica para actualizar el estado si lo necesitas
   };
 
   const fetchModelInfo = async () => {
@@ -96,7 +104,8 @@ export default function App() {
     const generatedNeurons: Neuron[] = [];
     const generatedConnections: Connection[] = [];
 
-    // Genera neuronas solo para capas Dense/InputLayer
+    // Generación de neuronas para capas Dense y InputLayer
+    const verticalMargin = 40;
     layerData.forEach((layer, layerIdx) => {
       if (
         (layer.type === 'Dense' || layer.type === 'InputLayer') &&
@@ -104,13 +113,13 @@ export default function App() {
         layer.neuron_count > 0
       ) {
         const count = layer.neuron_count;
-        const neuronSpacing = clientHeight / (count + 1);
+        const neuronSpacing = (clientHeight - verticalMargin * 2) / (count - 1 || 1);
 
         for (let i = 0; i < count; i++) {
           generatedNeurons.push({
             id: `${layerIdx}-${i}`,
             x: (layerIdx + 1) * layerSpacing,
-            y: (i + 1) * neuronSpacing,
+            y: verticalMargin + i * neuronSpacing,
             layerIndex: layerIdx,
             neuronIndex: i,
           });
@@ -330,41 +339,26 @@ export default function App() {
             const x = (selectedLayerIdx + 1) * layerSpacing - 30;
             const width = 60;
             const svgHeight = svgRef.current ? svgRef.current.clientHeight : 400;
-            const y = 0;
-            const height = svgHeight;
+            const isDense = layer.type === 'Dense';
+            const y = isDense ? 20 : 40;
+            const height = isDense
+              ? svgHeight - 40
+              : svgHeight - 80; 
 
-            if (layer.type === 'Dense') {
-              // Dibuja un óvalo para Dense
-              return (
-                <ellipse
-                  cx={x + width / 2}
-                  cy={y + height / 2}
-                  rx={width / 2}
-                  ry={height + 0.5 / 2}
-                  fill="none"
-                  stroke="#e67e22"
-                  strokeWidth={4}
-                  opacity={0.95}
-                  style={{ pointerEvents: 'none' }}
-                />
-              );
-            } else {
-              // Rectángulo para capas no Dense
-              return (
-                <rect
-                  x={x}
-                  y={40}
-                  width={width}
-                  height={svgHeight - 80}
-                  fill="none"
-                  stroke="#e67e22"
-                  strokeWidth={4}
-                  rx={10}
-                  opacity={0.95}
-                  style={{ pointerEvents: 'none' }}
-                />
-              );
-            }
+            return (
+              <rect
+                x={x}
+                y={y}
+                width={width}
+                height={height}
+                fill="none"
+                stroke="#e67e22"
+                strokeWidth={5}
+                rx={isDense ? 8 : 10}
+                opacity={0.95}
+                style={{ pointerEvents: 'none' }}
+              />
+            );
           })()
         )}
       </svg>
@@ -417,13 +411,70 @@ export default function App() {
       <Card>
         <CardContent>
           <h2 className="text-lg font-bold mb-2">Cargar modelo</h2>
-          <Input type="file" onChange={e => setModelFile(e.target.files?.[0] || null)} />
-          <Button onClick={loadModel} className="mt-2">Cargar</Button>
+          <div className="flex flex-col gap-2">
+            <Input
+              type="file"
+              accept=".keras"
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (file && file.name.endsWith('.keras')) setModelFile(file);
+                else setModelFile(null);
+              }}
+            />
+            <Button
+              onClick={loadModel}
+              className="mt-2"
+              disabled={!modelFile}
+            >
+              Cargar modelo
+            </Button>
+            <Input
+              type="file"
+              accept=".npy"
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (file && file.name.endsWith('.npy')) setNpyFile(file);
+                else setNpyFile(null);
+              }}
+            />
+            <Button
+              onClick={uploadNpy}
+              className="mt-2"
+              disabled={!npyFile}
+            >
+              Cargar parámetros
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
       {modelInfo && (
         <>
+          {/* Detalles del modelo */}
+          <Card className="mt-4">
+            <CardContent>
+              <h2 className="text-lg font-bold mb-2">Detalles del Modelo</h2>
+              <p className="text-sm mb-2">
+                Nombre: <strong>{modelInfo.metadata.model_name}</strong>
+              </p>
+              <p className="text-sm mb-2">
+                Parámetros: <strong>{modelInfo.metadata.total_params}</strong> (
+                <span className="text-green-700">{modelInfo.metadata.trainable_params} entrenables</span>, 
+                <span className="text-gray-700">{modelInfo.metadata.non_trainable_params} no entrenables</span>)
+              </p>
+              <p className="text-sm mb-2">
+                Función de pérdida: <strong>{modelInfo.loss || 'N/A'}</strong>
+              </p>
+              <p className="text-sm mb-2">
+                Optimizador: <strong>{modelInfo.optimizer?.type || 'N/A'}</strong>
+              </p>
+              <p className="text-sm mb-4">
+                Métricas: <strong>{modelInfo.metrics?.join(', ') || 'N/A'}</strong>
+              </p>
+            </CardContent>
+          </Card>
+
+          {/* Visualización de la red */}
           <Card className="mt-4">
             <CardContent>
               <h2 className="text-lg font-bold mb-2">Visualización de Red Neuronal</h2>
@@ -534,47 +585,48 @@ export default function App() {
             </CardContent>
           </Card>
 
+          {/* Lista horizontal de capas y detalle de capa seleccionada */}
           <Card className="mt-4">
             <CardContent>
-              <h2 className="text-lg font-bold mb-2">Detalles del Modelo</h2>
-              <p className="text-sm mb-2">Nombre: <strong>{modelInfo.metadata.model_name}</strong></p>
-              <p className="text-sm mb-2">Parámetros: <strong>{modelInfo.metadata.total_params}</strong> (<span className="text-green-700">{modelInfo.metadata.trainable_params} entrenables</span>, <span className="text-gray-700"> {modelInfo.metadata.non_trainable_params} no entrenables</span>)</p>
-              <p className="text-sm mb-2">Función de pérdida: <strong>{modelInfo.loss || 'N/A'}</strong></p>
-              <p className="text-sm mb-2">Optimizador: <strong>{modelInfo.optimizer?.type || 'N/A'}</strong></p>
-              <p className="text-sm mb-4">Métricas: <strong>{modelInfo.metrics?.join(', ') || 'N/A'}</strong></p>
+              <h2 className="text-lg font-bold mb-2">Capas del Modelo</h2>
+              <div className="flex flex-wrap gap-2 mb-4">
+                {modelInfo.layers.map((layer, idx) => (
+                  <button
+                    key={idx}
+                    className={`px-3 py-1 rounded border text-sm font-semibold transition ${
+                      selectedLayerIdx === idx
+                        ? 'bg-blue-200 border-blue-600 text-blue-900'
+                        : 'bg-white border-gray-300 text-gray-700 hover:bg-blue-50'
+                    }`}
+                    onClick={() => setSelectedLayerIdx(idx)}
+                  >
+                    {layer.name}
+                  </button>
+                ))}
+              </div>
+              {selectedLayerIdx !== null && modelInfo.layers[selectedLayerIdx] && (
+                <Card className="mb-2 border-4 rounded-lg border-blue-600 bg-blue-50">
+                  <CardContent>
+                    <strong>{modelInfo.layers[selectedLayerIdx].name}</strong>{' '}
+                    <span className="text-xs text-gray-500">
+                      ({modelInfo.layers[selectedLayerIdx].type || 'Capa'})
+                    </span>
+                    <div className="mt-2 text-sm">
+                      {modelInfo.layers[selectedLayerIdx].activation && (
+                        <div>- Activación: <strong>{modelInfo.layers[selectedLayerIdx].activation}</strong></div>
+                      )}
+                      {modelInfo.layers[selectedLayerIdx].output_shape && (
+                        <div>- Salida: {modelInfo.layers[selectedLayerIdx].output_shape.join(', ')}</div>
+                      )}
+                      {modelInfo.layers[selectedLayerIdx].config && (
+                        <div>- Config: {renderConfig(modelInfo.layers[selectedLayerIdx].config)}</div>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
             </CardContent>
           </Card>
-
-          {/* Grilla de capas fuera del Card de detalles */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mt-4">
-            {modelInfo.layers.map((layer, idx) => (
-              <Card
-                key={idx}
-                className={`mb-2 cursor-pointer border-4 rounded-lg`}
-                onClick={() => setSelectedLayerIdx(selectedLayerIdx === idx ? null : idx)}
-                style={
-                  selectedLayerIdx === idx
-                    ? {
-                        borderColor: '#2563eb',
-                        boxShadow: '0 4px 24px 0 rgba(37,99,235,0.15)',
-                        borderWidth: 2,
-                      }
-                    : {
-
-                      }
-                }
-              >
-                <CardContent>
-                  <strong>{layer.name}</strong> <span className="text-xs text-gray-500">({layer.type || 'Capa'})</span>
-                  <div className="mt-2 text-sm">
-                    <div>- Activación: <strong>{layer.activation || 'N/A'}</strong></div>
-                    <div>- Salida: {layer.output_shape?.join(', ') || 'N/A'}</div>
-                    <div>- Config: {layer.config ? renderConfig(layer.config) : 'N/A'}</div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
         </>
       )}
     </div>
