@@ -1,4 +1,5 @@
-// Frontend: pages/index.tsx (React + estructuras personalizadas con tooltip + datos del modelo + selección de neuronas + neuronas de entrada/salida visibles + info extendida + pesos + conexión a backend)
+// NNV - Neural Network Visualizer
+// Aplicación para visualizar y analizar modelos de redes neuronales Keras
 
 import { useState, useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
@@ -6,19 +7,23 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import axios from 'axios';
 
-// Axios configurado con el backend en 0.0.0.0:8000
 const api = axios.create({
   baseURL: 'http://localhost:8000',
 });
+
+// === INTERFACES ===
 
 interface Layer {
   index: number;
   name: string;
   output_shape?: number[];
+  input_shape?: number[];
   activation?: string | null;
   type?: string;
   config?: any;
   neuron_count?: number;
+  trainable?: boolean;
+  dtype?: string;
 }
 
 interface Neuron {
@@ -40,11 +45,36 @@ interface ModelMetadata {
   trainable_params: number;
   non_trainable_params: number;
   total_params: number;
+  keras_version?: string;
+  backend?: string;
+  date_saved?: string;
 }
 
 interface OptimizerInfo {
   type: string;
   config: any;
+}
+
+interface KerasFileStructure {
+  files: string[];
+  config_json?: any;
+  metadata_json?: any;
+}
+
+interface WeightTensorInfo {
+  name: string;
+  shape: number[];
+  dtype: string;
+  size: number;
+  min_value: number;
+  max_value: number;
+  mean_value: number;
+  std_value: number;
+}
+
+interface LayerWeightsInfo {
+  layer_name: string;
+  tensors: WeightTensorInfo[];
 }
 
 interface ModelInfo {
@@ -56,7 +86,12 @@ interface ModelInfo {
   metadata: ModelMetadata;
   weights: number[][][];
   biases: number[][];
+  keras_file_structure?: KerasFileStructure;
+  detailed_weights?: LayerWeightsInfo[];
 }
+
+// Tabs disponibles
+type TabType = 'file' | 'model' | 'params' | 'visualization';
 
 export default function App() {
   const [modelFile, setModelFile] = useState<File | null>(null);
@@ -69,6 +104,7 @@ export default function App() {
   const [hoveredConnection, setHoveredConnection] = useState<{source: string, target: string} | null>(null);
   const [hoveredNeuron, setHoveredNeuron] = useState<Neuron | null>(null);
   const [selectedLayerIdx, setSelectedLayerIdx] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState<TabType>('file');
   const svgRef = useRef<SVGSVGElement>(null);
 
   const loadModel = async () => {
@@ -84,7 +120,6 @@ export default function App() {
     const form = new FormData();
     form.append('npy', npyFile);
     await api.post('/carga_parametros', form);
-    // Puedes agregar lógica para actualizar el estado si lo necesitas
   };
 
   const fetchModelInfo = async () => {
@@ -96,16 +131,16 @@ export default function App() {
 
   const buildNetwork = (layerData: Layer[]) => {
     if (!svgRef.current) return;
-    const { clientWidth, clientHeight } = svgRef.current;
-
-    // Espaciado horizontal para todas las capas (Dense, Dropout, etc.)
+    
+    const clientWidth = svgRef.current.clientWidth > 0 ? svgRef.current.clientWidth : 1200;
+    const clientHeight = svgRef.current.clientHeight > 0 ? svgRef.current.clientHeight : 600;
     const layerSpacing = clientWidth / (layerData.length + 1);
 
     const generatedNeurons: Neuron[] = [];
     const generatedConnections: Connection[] = [];
-
-    // Generación de neuronas para capas Dense y InputLayer
     const verticalMargin = 40;
+    
+    // Generar neuronas para capas Dense e InputLayer
     layerData.forEach((layer, layerIdx) => {
       if (
         (layer.type === 'Dense' || layer.type === 'InputLayer') &&
@@ -127,8 +162,7 @@ export default function App() {
       }
     });
 
-    // Conexiones solo entre capas Dense/InputLayer consecutivas
-    // Busca los índices absolutos de las capas visualizables
+    // Generar conexiones entre capas consecutivas
     const visualLayerIndices = layerData
       .map((layer, idx) =>
         (layer.type === 'Dense' || layer.type === 'InputLayer') &&
@@ -156,18 +190,25 @@ export default function App() {
 
     setNeurons(generatedNeurons);
     setConnections(generatedConnections);
-    console.log('Neurons:', generatedNeurons.length, 'Connections:', generatedConnections.length);
   };
 
   useEffect(() => {
-    if (layers.length > 0) {
+    if (layers.length > 0 && activeTab === 'visualization') {
+      // Pequeño delay para asegurar que el SVG esté renderizado
       setTimeout(() => {
         if (svgRef.current && svgRef.current.clientWidth > 0 && svgRef.current.clientHeight > 0) {
           buildNetwork(layers);
+        } else {
+          // Reintentar si el SVG no tiene dimensiones aún
+          setTimeout(() => {
+            if (svgRef.current && svgRef.current.clientWidth > 0) {
+              buildNetwork(layers);
+            }
+          }, 200);
         }
-      }, 100); // 100ms suele ser suficiente
+      }, 100);
     }
-  }, [layers]);
+  }, [layers, activeTab]);
 
   function CustomGraph() {
     const visibleConnections = selectedNeuron
@@ -188,7 +229,7 @@ export default function App() {
       : 100;
 
     return (
-      <svg ref={svgRef} width="100%" height="90vh">
+      <svg ref={svgRef} width="100%" height="600" style={{ minHeight: '600px', background: '#fafafa' }}>
         {/* Rectángulos para capas no Dense */}
         {nonDenseLayers.map((layer) => {
           const x = (layer.idx + 1) * layerSpacing - 30;
@@ -220,13 +261,13 @@ export default function App() {
           );
         })}
 
-        {/* Solo conexiones de la neurona seleccionada */}
+        {/* Conexiones de la neurona seleccionada */}
         {visibleConnections.map((conn, idx) => {
           const source = neurons.find(n => n.id === conn.source);
           const target = neurons.find(n => n.id === conn.target);
           if (!source || !target) return null;
 
-          const [layerA, neuronA] = source.id.split('-').map(Number);
+          const [, neuronA] = source.id.split('-').map(Number);
           const [layerB, neuronB] = target.id.split('-').map(Number);
 
           const weight = modelInfo?.weights?.[layerB]?.[neuronA]?.[neuronB];
@@ -290,7 +331,7 @@ export default function App() {
                     fontWeight="bold"
                     style={{ userSelect: 'none' }}
                   >
-                    Peso: {Number(weight).toPrecision(4)}
+                    Peso: {formatNumber(weight, 4)}
                   </text>
                 </>
               )}
@@ -315,10 +356,17 @@ export default function App() {
                   : '#cce5ff'
               }
               stroke="#333"
-              onClick={() => setSelectedNeuron(neuron)}
+              onClick={() => {
+                // Toggle: si ya está seleccionada, deseleccionar
+                if (selectedNeuron?.id === neuron.id) {
+                  setSelectedNeuron(null);
+                } else {
+                  setSelectedNeuron(neuron);
+                }
+              }}
               onMouseEnter={() => setHoveredNeuron(neuron)}
               onMouseLeave={() => setHoveredNeuron(null)}
-              style={{ cursor: 'pointer' }}
+              style={{ cursor: 'pointer', filter: hoveredNeuron?.id === neuron.id ? 'drop-shadow(0 0 6px rgba(0,0,0,0.5))' : 'none' }}
             />
             {selectedNeuron?.id === neuron.id && (
               <text x={neuron.x + 12} y={neuron.y - 12} fontSize="12" fill="#333">
@@ -327,40 +375,95 @@ export default function App() {
             )}
           </g>
         ))}
+      </svg>
+    );
+  }
 
-        {/* Resaltado de la capa seleccionada */}
-        {selectedLayerIdx !== null && (
-          (() => {
-            const layer = layers[selectedLayerIdx];
-            if (!layer) return null;
-            const layerSpacing = svgRef.current
-              ? svgRef.current.clientWidth / (layers.length + 1)
-              : 100;
-            const x = (selectedLayerIdx + 1) * layerSpacing - 30;
-            const width = 60;
-            const svgHeight = svgRef.current ? svgRef.current.clientHeight : 400;
-            const isDense = layer.type === 'Dense';
-            const y = isDense ? 20 : 40;
-            const height = isDense
-              ? svgHeight - 40
-              : svgHeight - 80; 
+  // Componente de mini previsualización para la tab de Modelo
+  function MiniNetworkPreview({ highlightLayerIdx }: { highlightLayerIdx: number | null }) {
+    // Ancho dinámico: mínimo 50px por capa, mínimo total 200px
+    const layerSpacing = 50;
+    const previewWidth = Math.max(200, (layers.length + 1) * layerSpacing);
+    const previewHeight = 200;
+    const verticalMargin = 20;
 
-            return (
+    return (
+      <svg width={previewWidth} height={previewHeight} style={{ background: '#f8f9fa', borderRadius: '8px', border: '1px solid #ddd' }}>
+        {/* Capas no Dense (BatchNorm, Dropout, etc) */}
+        {layers.map((layer, idx) => {
+          if (layer.type === 'Dense' || layer.type === 'InputLayer') return null;
+          const x = (idx + 1) * layerSpacing - 15;
+          return (
+            <g key={`nondense-${idx}`}>
               <rect
                 x={x}
-                y={y}
-                width={width}
-                height={height}
-                fill="none"
-                stroke="#e67e22"
-                strokeWidth={5}
-                rx={isDense ? 8 : 10}
-                opacity={0.95}
-                style={{ pointerEvents: 'none' }}
+                y={verticalMargin}
+                width={30}
+                height={previewHeight - verticalMargin * 2}
+                fill={highlightLayerIdx === idx ? '#ffcc80' : '#ffe4b2'}
+                stroke={highlightLayerIdx === idx ? '#e67e22' : '#b8860b'}
+                strokeWidth={highlightLayerIdx === idx ? 3 : 1}
+                rx={5}
+                opacity={0.8}
               />
-            );
-          })()
-        )}
+              <text x={x + 15} y={verticalMargin + 15} textAnchor="middle" fontSize="8" fill="#b8860b">
+                {(layer.type || '').substring(0, 4)}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Neuronas para capas Dense/InputLayer */}
+        {layers.map((layer, layerIdx) => {
+          if (layer.type !== 'Dense' && layer.type !== 'InputLayer') return null;
+          if (!layer.neuron_count || layer.neuron_count === 0) return null;
+          
+          const count = Math.min(layer.neuron_count, 10); // Limitar a 10 para la mini vista
+          const neuronSpacing = (previewHeight - verticalMargin * 2) / (count - 1 || 1);
+          const isHighlighted = highlightLayerIdx === layerIdx;
+          
+          return (
+            <g key={`layer-${layerIdx}`}>
+              {/* Rectángulo de resaltado */}
+              {isHighlighted && (
+                <rect
+                  x={(layerIdx + 1) * layerSpacing - 20}
+                  y={verticalMargin - 10}
+                  width={40}
+                  height={previewHeight - verticalMargin * 2 + 20}
+                  fill="none"
+                  stroke="#e67e22"
+                  strokeWidth={3}
+                  rx={8}
+                />
+              )}
+              {/* Neuronas */}
+              {Array.from({ length: count }).map((_, i) => (
+                <circle
+                  key={`${layerIdx}-${i}`}
+                  cx={(layerIdx + 1) * layerSpacing}
+                  cy={verticalMargin + i * neuronSpacing}
+                  r={5}
+                  fill={isHighlighted ? '#ffcc80' : '#cce5ff'}
+                  stroke={isHighlighted ? '#e67e22' : '#333'}
+                  strokeWidth={isHighlighted ? 2 : 1}
+                />
+              ))}
+              {/* Indicador de más neuronas */}
+              {layer.neuron_count > 10 && (
+                <text
+                  x={(layerIdx + 1) * layerSpacing}
+                  y={previewHeight - 5}
+                  textAnchor="middle"
+                  fontSize="8"
+                  fill="#666"
+                >
+                  +{layer.neuron_count - 10}
+                </text>
+              )}
+            </g>
+          );
+        })}
       </svg>
     );
   }
@@ -391,20 +494,58 @@ export default function App() {
   }
 
   // Función para calcular estadísticas
-  function getStats(arr: number[]) {
-    if (!arr || arr.length === 0) return null;
-    const sorted = [...arr].sort((a, b) => a - b);
-    const min = sorted[0];
-    const max = sorted[sorted.length - 1];
-    const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  // Formatea un valor numérico de forma segura. Devuelve 'N/A' si no es número finito.
+  function formatNumber(value: any, precision = 5) {
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n)) return 'N/A';
+    try {
+      return n.toPrecision(precision);
+    } catch {
+      return String(n);
+    }
+  }
+
+  // Calcular estadísticas a partir de una estructura que puede contener
+  // números, arrays anidados, o valores undefined. Recoge recursivamente números finitos.
+  function getStats(arr: any) {
+    if (arr == null) return null;
+    const nums: number[] = [];
+    const collect = (x: any) => {
+      if (x == null) return;
+      if (Array.isArray(x)) {
+        x.forEach(collect);
+        return;
+      }
+      const n = Number(x);
+      if (Number.isFinite(n)) nums.push(n);
+    };
+    collect(arr);
+    if (nums.length === 0) return null;
+    nums.sort((a, b) => a - b);
+    const min = nums[0];
+    const max = nums[nums.length - 1];
+    const mean = nums.reduce((s, v) => s + v, 0) / nums.length;
     const median =
-      arr.length % 2 === 0
-        ? (sorted[arr.length / 2 - 1] + sorted[arr.length / 2]) / 2
-        : sorted[Math.floor(arr.length / 2)];
-    const variance =
-      arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / arr.length;
+      nums.length % 2 === 0
+        ? (nums[nums.length / 2 - 1] + nums[nums.length / 2]) / 2
+        : nums[Math.floor(nums.length / 2)];
+    const variance = nums.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / nums.length;
     return { min, max, mean, median, variance };
   }
+
+  // Tab button component
+  const TabButton = ({ tab, label, icon }: { tab: TabType; label: string; icon: string }) => (
+    <button
+      onClick={() => setActiveTab(tab)}
+      className={`px-4 py-2 font-semibold text-sm rounded-t-lg transition-all ${
+        activeTab === tab
+          ? 'bg-white border-t-2 border-l border-r border-blue-500 text-blue-700 -mb-px'
+          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-transparent'
+      }`}
+    >
+      {icon} {label}
+    </button>
+  );
 
   return (
     <div className="p-4">
@@ -450,138 +591,92 @@ export default function App() {
 
       {modelInfo && (
         <>
-          {/* Detalles del modelo */}
-          <Card className="mt-4">
-            <CardContent>
-              <h2 className="text-lg font-bold mb-2">Detalles del Modelo</h2>
-              <p className="text-sm mb-2">
-                Nombre: <strong>{modelInfo.metadata.model_name}</strong>
-              </p>
-              <p className="text-sm mb-2">
-                Parámetros: <strong>{modelInfo.metadata.total_params}</strong> (
-                <span className="text-green-700">{modelInfo.metadata.trainable_params} entrenables</span>, 
-                <span className="text-gray-700">{modelInfo.metadata.non_trainable_params} no entrenables</span>)
-              </p>
-              <p className="text-sm mb-2">
-                Función de pérdida: <strong>{modelInfo.loss || 'N/A'}</strong>
-              </p>
-              <p className="text-sm mb-2">
-                Optimizador: <strong>{modelInfo.optimizer?.type || 'N/A'}</strong>
-              </p>
-              <p className="text-sm mb-4">
-                Métricas: <strong>{modelInfo.metrics?.join(', ') || 'N/A'}</strong>
-              </p>
-            </CardContent>
-          </Card>
+          {/* Tab Navigation */}
+          <div className="mt-4 flex gap-1 border-b border-gray-300">
+            <TabButton tab="file" label="Archivo" icon="📦" />
+            <TabButton tab="model" label="Modelo" icon="🧠" />
+            <TabButton tab="params" label="Parámetros" icon="⚖️" />
+            <TabButton tab="visualization" label="Visualización" icon="🔗" />
+          </div>
 
-          {/* Visualización de la red */}
-          <Card className="mt-4">
-            <CardContent>
-              <h2 className="text-lg font-bold mb-2">Visualización de Red Neuronal</h2>
-              <CustomGraph />
-              {selectedNeuron && (
-                <div className="text-sm mt-4 bg-gray-50 p-2 rounded border">
-                  <p><strong>Neurona seleccionada:</strong> Capa {selectedNeuron.layerIndex}, Índice {selectedNeuron.neuronIndex}</p>
-                  {/* Estadísticas de Input (primer capa) */}
-                  {selectedNeuron.layerIndex === Math.min(...neurons.map(n => n.layerIndex)) ? (
-                    <div className="mt-1">
-                      <p>Estadísticas de pesos de entrada:</p>
-                      <ul className="ml-4 list-disc">
-                        <li>Sin pesos de entrada</li>
-                      </ul>
-                    </div>
-                  ) : (
-                    modelInfo.weights?.[selectedNeuron.layerIndex] && (
-                      (() => {
-                        // Pesos de entrada: columna de la neurona en la matriz de la capa actual
-                        const weightsArr = modelInfo.weights[selectedNeuron.layerIndex].map(row => row[selectedNeuron.neuronIndex]);
-                        const stats = getStats(weightsArr);
-                        return stats ? (
-                          <div className="mt-1">
-                            <p>Estadísticas de pesos de entrada:</p>
-                            <ul className="ml-4 list-disc">
-                              <li>Mínimo: {stats.min.toPrecision(5)}</li>
-                              <li>Máximo: {stats.max.toPrecision(5)}</li>
-                              <li>Media: {stats.mean.toPrecision(5)}</li>
-                              <li>Mediana: {stats.median.toPrecision(5)}</li>
-                              <li>Varianza: {stats.variance.toPrecision(5)}</li>
-                            </ul>
-                          </div>
-                        ) : null;
-                      })()
-                    )
+          {/* Tab: Archivo - Estructura del archivo .keras */}
+          {activeTab === 'file' && modelInfo.keras_file_structure && (
+            <Card className="mt-0 border-2 border-purple-300 bg-purple-50 rounded-t-none">
+              <CardContent>
+                <h2 className="text-lg font-bold mb-2 text-purple-800">📦 Estructura del archivo .keras</h2>
+                <p className="text-sm mb-2">
+                  El archivo <code>.keras</code> es un ZIP que contiene:
+                </p>
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {modelInfo.keras_file_structure.files.map((file, idx) => (
+                    <span
+                      key={idx}
+                      className={`px-2 py-1 rounded text-xs font-mono ${
+                        file.endsWith('.json') ? 'bg-blue-100 text-blue-800' :
+                        file.endsWith('.h5') ? 'bg-green-100 text-green-800' :
+                        'bg-gray-100 text-gray-800'
+                      }`}
+                    >
+                      {file}
+                    </span>
+                  ))}
+                </div>
+                {modelInfo.keras_file_structure.metadata_json && (
+                  <div className="text-sm bg-white p-2 rounded border mb-2">
+                    <strong>Metadatos del archivo:</strong>
+                    <ul className="ml-4 list-disc text-xs mt-1">
+                      {Object.entries(modelInfo.keras_file_structure.metadata_json).map(([key, value]) => (
+                        <li key={key}>{key}: <code>{String(value)}</code></li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Tab: Modelo - Detalles del modelo y capas */}
+          {activeTab === 'model' && (
+            <>
+              <Card className="mt-0 rounded-t-none">
+                <CardContent>
+                  <h2 className="text-lg font-bold mb-2">Detalles del Modelo</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <p className="text-sm mb-2">
+                    Nombre: <strong>{modelInfo.metadata.model_name}</strong>
+                  </p>
+                  <p className="text-sm mb-2">
+                    Parámetros: <strong>{modelInfo.metadata.total_params.toLocaleString()}</strong> (
+                    <span className="text-green-700">{modelInfo.metadata.trainable_params.toLocaleString()} entrenables</span>, 
+                    <span className="text-gray-700">{modelInfo.metadata.non_trainable_params.toLocaleString()} no entrenables</span>)
+                  </p>
+                  <p className="text-sm mb-2">
+                    Función de pérdida: <strong>{modelInfo.loss || 'N/A'}</strong>
+                  </p>
+                  <p className="text-sm mb-2">
+                    Optimizador: <strong>{modelInfo.optimizer?.type || 'N/A'}</strong>
+                  </p>
+                  <p className="text-sm mb-4">
+                    Métricas: <strong>{modelInfo.metrics?.join(', ') || 'N/A'}</strong>
+                  </p>
+                </div>
+                <div className="bg-gray-50 p-3 rounded">
+                  <p className="text-sm font-semibold mb-2">Información del archivo .keras:</p>
+                  {modelInfo.metadata.keras_version && (
+                    <p className="text-xs mb-1">Keras: <code>{modelInfo.metadata.keras_version}</code></p>
                   )}
-                  {/* Estadísticas de Output (última capa) */}
-                  {selectedNeuron.layerIndex === Math.max(...neurons.map(n => n.layerIndex)) && modelInfo.weights?.[selectedNeuron.layerIndex] && (
-                    (() => {
-                      // Pesos de salida: fila de la neurona en la matriz de la capa actual
-                      const weightsArr = modelInfo.weights[selectedNeuron.layerIndex][selectedNeuron.neuronIndex];
-                      const stats = getStats(weightsArr);
-                      return stats ? (
-                        <div className="mt-1">
-                          <p>Estadísticas de pesos de salida:</p>
-                          <ul className="ml-4 list-disc">
-                            <li>Mínimo: {stats.min.toPrecision(5)}</li>
-                            <li>Máximo: {stats.max.toPrecision(5)}</li>
-                            <li>Media: {stats.mean.toPrecision(5)}</li>
-                            <li>Mediana: {stats.median.toPrecision(5)}</li>
-                            <li>Varianza: {stats.variance.toPrecision(5)}</li>
-                          </ul>
-                        </div>
-                      ) : null;
-                    })()
+                  {modelInfo.metadata.backend && (
+                    <p className="text-xs mb-1">Backend: <code>{modelInfo.metadata.backend}</code></p>
                   )}
-                  {/* Estadísticas de pesos internos (capas ocultas Dense) */}
-                  {selectedNeuron.layerIndex !== Math.min(...neurons.map(n => n.layerIndex)) &&
-                    selectedNeuron.layerIndex !== Math.max(...neurons.map(n => n.layerIndex)) &&
-                    modelInfo.weights?.[selectedNeuron.layerIndex] && modelInfo.weights?.[selectedNeuron.layerIndex + 1] && (
-                    (() => {
-                      // Pesos de salida (fila actual)
-                      const outArr = modelInfo.weights[selectedNeuron.layerIndex][selectedNeuron.neuronIndex];
-                      // Pesos de entrada (columna en la matriz de la siguiente capa)
-                      const inArr = modelInfo.weights[selectedNeuron.layerIndex + 1].map(row => row[selectedNeuron.neuronIndex]);
-                      const outStats = getStats(outArr);
-                      const inStats = getStats(inArr);
-                      return (
-                        <div className="mt-1">
-                          <p>Estadísticas de pesos de salida:</p>
-                          <ul className="ml-4 list-disc">
-                            {outStats ? (
-                              <>
-                                <li>Mínimo: {outStats.min.toPrecision(5)}</li>
-                                <li>Máximo: {outStats.max.toPrecision(5)}</li>
-                                <li>Media: {outStats.mean.toPrecision(5)}</li>
-                                <li>Mediana: {outStats.median.toPrecision(5)}</li>
-                                <li>Varianza: {outStats.variance.toPrecision(5)}</li>
-                              </>
-                            ) : (
-                              <li>No hay estadísticas disponibles.</li>
-                            )}
-                          </ul>
-                          <p>Estadísticas de pesos de entrada:</p>
-                          <ul className="ml-4 list-disc">
-                            {inStats ? (
-                              <>
-                                <li>Mínimo: {inStats.min.toPrecision(5)}</li>
-                                <li>Máximo: {inStats.max.toPrecision(5)}</li>
-                                <li>Media: {inStats.mean.toPrecision(5)}</li>
-                                <li>Mediana: {inStats.median.toPrecision(5)}</li>
-                                <li>Varianza: {inStats.variance.toPrecision(5)}</li>
-                              </>
-                            ) : (
-                              <li>No hay estadísticas disponibles.</li>
-                            )}
-                          </ul>
-                        </div>
-                      );
-                    })()
+                  {modelInfo.metadata.date_saved && (
+                    <p className="text-xs mb-1">Guardado: <code>{modelInfo.metadata.date_saved}</code></p>
                   )}
-                  {/* Bias */}
-                  {modelInfo.biases?.[selectedNeuron.layerIndex]?.[selectedNeuron.neuronIndex] !== undefined && (
-                    <p>Bias: <code>{modelInfo.biases[selectedNeuron.layerIndex][selectedNeuron.neuronIndex]}</code></p>
+                  {!modelInfo.metadata.keras_version && !modelInfo.metadata.backend && (
+                    <p className="text-xs text-gray-500">No hay metadatos adicionales disponibles</p>
                   )}
                 </div>
-              )}
+              </div>
             </CardContent>
           </Card>
 
@@ -596,37 +691,279 @@ export default function App() {
                     className={`px-3 py-1 rounded border text-sm font-semibold transition ${
                       selectedLayerIdx === idx
                         ? 'bg-blue-200 border-blue-600 text-blue-900'
-                        : 'bg-white border-gray-300 text-gray-700 hover:bg-blue-50'
+                        : layer.type === 'Dense' ? 'bg-blue-50 border-blue-300 text-blue-700 hover:bg-blue-100'
+                        : layer.type === 'InputLayer' ? 'bg-green-50 border-green-300 text-green-700 hover:bg-green-100'
+                        : layer.type === 'Dropout' ? 'bg-yellow-50 border-yellow-300 text-yellow-700 hover:bg-yellow-100'
+                        : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
                     }`}
-                    onClick={() => setSelectedLayerIdx(idx)}
+                    onClick={() => setSelectedLayerIdx(selectedLayerIdx === idx ? null : idx)}
                   >
                     {layer.name}
+                    <span className="ml-1 text-xs opacity-60">({layer.type})</span>
                   </button>
                 ))}
               </div>
+              
+              {/* Grid con detalles y mini previsualización */}
               {selectedLayerIdx !== null && modelInfo.layers[selectedLayerIdx] && (
-                <Card className="mb-2 border-4 rounded-lg border-blue-600 bg-blue-50">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  {/* Detalles de la capa (2/3) */}
+                  <Card className="lg:col-span-2 border-4 rounded-lg border-blue-600 bg-blue-50">
+                    <CardContent>
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <strong className="text-lg">{modelInfo.layers[selectedLayerIdx].name}</strong>{' '}
+                        <span className="px-2 py-0.5 bg-blue-200 rounded text-xs text-blue-800">
+                          {modelInfo.layers[selectedLayerIdx].type || 'Capa'}
+                        </span>
+                      </div>
+                      <div className="text-right text-xs">
+                        {modelInfo.layers[selectedLayerIdx].trainable !== undefined && (
+                          <span className={`px-2 py-0.5 rounded ${
+                            modelInfo.layers[selectedLayerIdx].trainable 
+                              ? 'bg-green-200 text-green-800' 
+                              : 'bg-gray-200 text-gray-600'
+                          }`}>
+                            {modelInfo.layers[selectedLayerIdx].trainable ? '✓ Entrenable' : '✗ No entrenable'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="text-sm">
+                        <p className="font-semibold mb-1">Dimensiones:</p>
+                        {modelInfo.layers[selectedLayerIdx].input_shape && (
+                          <div className="text-xs mb-1">
+                            Entrada: <code className="bg-white px-1 rounded">[{modelInfo.layers[selectedLayerIdx].input_shape.join(', ')}]</code>
+                          </div>
+                        )}
+                        {modelInfo.layers[selectedLayerIdx].output_shape && (
+                          <div className="text-xs mb-1">
+                            Salida: <code className="bg-white px-1 rounded">[{modelInfo.layers[selectedLayerIdx].output_shape.join(', ')}]</code>
+                          </div>
+                        )}
+                        {modelInfo.layers[selectedLayerIdx].neuron_count && (
+                          <div className="text-xs mb-1">
+                            Neuronas: <strong>{modelInfo.layers[selectedLayerIdx].neuron_count}</strong>
+                          </div>
+                        )}
+                        {modelInfo.layers[selectedLayerIdx].activation && 
+                         modelInfo.layers[selectedLayerIdx].activation !== 'None' && (
+                          <div className="text-xs mb-1">
+                            Activación: <code className="bg-yellow-100 px-1 rounded">{modelInfo.layers[selectedLayerIdx].activation}</code>
+                          </div>
+                        )}
+                        {modelInfo.layers[selectedLayerIdx].dtype && (
+                          <div className="text-xs mb-1">
+                            Dtype: <code className="bg-gray-100 px-1 rounded">{modelInfo.layers[selectedLayerIdx].dtype}</code>
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-sm">
+                        <p className="font-semibold mb-1">Configuración completa:</p>
+                        {modelInfo.layers[selectedLayerIdx].config && (
+                          <div className="text-xs bg-white p-2 rounded border max-h-40 overflow-y-auto">
+                            {renderConfig(modelInfo.layers[selectedLayerIdx].config)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+                
+                  {/* Mini previsualización (1/3) */}
+                  <Card className="border-2 rounded-lg border-orange-400 bg-orange-50">
+                    <CardContent>
+                      <p className="font-semibold mb-2 text-sm text-orange-800">📍 Ubicación en la red</p>
+                      <div className="overflow-x-auto">
+                        <MiniNetworkPreview highlightLayerIdx={selectedLayerIdx} />
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+            </>
+          )}
+
+          {/* Tab: Parámetros - Estadísticas de pesos */}
+          {activeTab === 'params' && (
+            <>
+              {modelInfo.detailed_weights && modelInfo.detailed_weights.length > 0 && (
+                <Card className="mt-0 border-2 border-green-300 bg-green-50 rounded-t-none">
                   <CardContent>
-                    <strong>{modelInfo.layers[selectedLayerIdx].name}</strong>{' '}
-                    <span className="text-xs text-gray-500">
-                      ({modelInfo.layers[selectedLayerIdx].type || 'Capa'})
-                    </span>
-                    <div className="mt-2 text-sm">
-                      {modelInfo.layers[selectedLayerIdx].activation && (
-                        <div>- Activación: <strong>{modelInfo.layers[selectedLayerIdx].activation}</strong></div>
-                      )}
-                      {modelInfo.layers[selectedLayerIdx].output_shape && (
-                        <div>- Salida: {modelInfo.layers[selectedLayerIdx].output_shape.join(', ')}</div>
-                      )}
-                      {modelInfo.layers[selectedLayerIdx].config && (
-                        <div>- Config: {renderConfig(modelInfo.layers[selectedLayerIdx].config)}</div>
-                      )}
+                    <h2 className="text-lg font-bold mb-2 text-green-800">⚖️ Estadísticas de Pesos por Capa</h2>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full text-xs">
+                        <thead>
+                          <tr className="bg-green-100">
+                            <th className="px-2 py-1 text-left">Capa</th>
+                            <th className="px-2 py-1 text-left">Tensor</th>
+                            <th className="px-2 py-1 text-right">Shape</th>
+                            <th className="px-2 py-1 text-right">Params</th>
+                            <th className="px-2 py-1 text-right">Min</th>
+                            <th className="px-2 py-1 text-right">Max</th>
+                            <th className="px-2 py-1 text-right">Media</th>
+                            <th className="px-2 py-1 text-right">Std</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {modelInfo.detailed_weights.map((layerWeight, idx) => (
+                            layerWeight.tensors.map((tensor, tIdx) => (
+                              <tr key={`${idx}-${tIdx}`} className={idx % 2 === 0 ? 'bg-white' : 'bg-green-50'}>
+                                {tIdx === 0 && (
+                                  <td className="px-2 py-1 font-semibold" rowSpan={layerWeight.tensors.length}>
+                                    {layerWeight.layer_name}
+                                  </td>
+                                )}
+                                <td className="px-2 py-1 font-mono text-gray-600">
+                                  {tensor.name.split('/').pop()}
+                                </td>
+                                <td className="px-2 py-1 text-right font-mono">
+                                  [{tensor.shape.join(', ')}]
+                                </td>
+                                <td className="px-2 py-1 text-right">
+                                  {tensor.size.toLocaleString()}
+                                </td>
+                                <td className="px-2 py-1 text-right font-mono">
+                                  {tensor.min_value.toFixed(4)}
+                                </td>
+                                <td className="px-2 py-1 text-right font-mono">
+                                  {tensor.max_value.toFixed(4)}
+                                </td>
+                                <td className="px-2 py-1 text-right font-mono">
+                                  {tensor.mean_value.toFixed(4)}
+                                </td>
+                                <td className="px-2 py-1 text-right font-mono">
+                                  {tensor.std_value.toFixed(4)}
+                                </td>
+                              </tr>
+                            ))
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   </CardContent>
                 </Card>
               )}
-            </CardContent>
-          </Card>
+            </>
+          )}
+
+          {/* Tab: Visualización - Red neuronal */}
+          {activeTab === 'visualization' && (
+            <>
+              <Card className="mt-0 rounded-t-none">
+                <CardContent>
+                  <h2 className="text-lg font-bold mb-2">Visualización de Red Neuronal</h2>
+                  <CustomGraph />
+                  {selectedNeuron && (
+                    <div className="text-sm mt-4 bg-gray-50 p-2 rounded border">
+                      <p><strong>Neurona seleccionada:</strong> Capa {selectedNeuron.layerIndex}, Índice {selectedNeuron.neuronIndex}</p>
+                      {/* Estadísticas de Input (primer capa) */}
+                      {selectedNeuron.layerIndex === Math.min(...neurons.map(n => n.layerIndex)) ? (
+                        <div className="mt-1">
+                          <p>Estadísticas de pesos de entrada:</p>
+                          <ul className="ml-4 list-disc">
+                            <li>Sin pesos de entrada</li>
+                          </ul>
+                        </div>
+                      ) : (
+                        modelInfo.weights?.[selectedNeuron.layerIndex] && (
+                          (() => {
+                            // Pesos de entrada: columna de la neurona en la matriz de la capa actual
+                            const weightsArr = modelInfo.weights[selectedNeuron.layerIndex].map(row => row[selectedNeuron.neuronIndex]);
+                            const stats = getStats(weightsArr);
+                            return stats ? (
+                              <div className="mt-1">
+                                <p>Estadísticas de pesos de entrada:</p>
+                                <ul className="ml-4 list-disc">
+                                  <li>Mínimo: {formatNumber(stats.min, 5)}</li>
+                                  <li>Máximo: {formatNumber(stats.max, 5)}</li>
+                                  <li>Media: {formatNumber(stats.mean, 5)}</li>
+                                  <li>Mediana: {formatNumber(stats.median, 5)}</li>
+                                  <li>Varianza: {formatNumber(stats.variance, 5)}</li>
+                                </ul>
+                              </div>
+                            ) : null;
+                          })()
+                        )
+                      )}
+                      {/* Estadísticas de Output (última capa) */}
+                      {selectedNeuron.layerIndex === Math.max(...neurons.map(n => n.layerIndex)) && modelInfo.weights?.[selectedNeuron.layerIndex] && (
+                        (() => {
+                          // Pesos de salida: fila de la neurona en la matriz de la capa actual
+                          const weightsArr = modelInfo.weights[selectedNeuron.layerIndex][selectedNeuron.neuronIndex];
+                          const stats = getStats(weightsArr);
+                          return stats ? (
+                            <div className="mt-1">
+                              <p>Estadísticas de pesos de salida:</p>
+                              <ul className="ml-4 list-disc">
+                                <li>Mínimo: {formatNumber(stats.min, 5)}</li>
+                                <li>Máximo: {formatNumber(stats.max, 5)}</li>
+                                <li>Media: {formatNumber(stats.mean, 5)}</li>
+                                <li>Mediana: {formatNumber(stats.median, 5)}</li>
+                                <li>Varianza: {formatNumber(stats.variance, 5)}</li>
+                              </ul>
+                            </div>
+                          ) : null;
+                        })()
+                      )}
+                      {/* Estadísticas de pesos internos (capas ocultas Dense) */}
+                      {selectedNeuron.layerIndex !== Math.min(...neurons.map(n => n.layerIndex)) &&
+                        selectedNeuron.layerIndex !== Math.max(...neurons.map(n => n.layerIndex)) &&
+                        modelInfo.weights?.[selectedNeuron.layerIndex] && modelInfo.weights?.[selectedNeuron.layerIndex + 1] && (
+                        (() => {
+                          // Pesos de salida (fila actual)
+                          const outArr = modelInfo.weights[selectedNeuron.layerIndex][selectedNeuron.neuronIndex];
+                          // Pesos de entrada (columna en la matriz de la siguiente capa)
+                          const inArr = modelInfo.weights[selectedNeuron.layerIndex + 1].map(row => row[selectedNeuron.neuronIndex]);
+                          const outStats = getStats(outArr);
+                          const inStats = getStats(inArr);
+                          return (
+                            <div className="mt-1">
+                              <p>Estadísticas de pesos de salida:</p>
+                              <ul className="ml-4 list-disc">
+                                {outStats ? (
+                                  <>
+                                    <li>Mínimo: {formatNumber(outStats.min, 5)}</li>
+                                    <li>Máximo: {formatNumber(outStats.max, 5)}</li>
+                                    <li>Media: {formatNumber(outStats.mean, 5)}</li>
+                                    <li>Mediana: {formatNumber(outStats.median, 5)}</li>
+                                    <li>Varianza: {formatNumber(outStats.variance, 5)}</li>
+                                  </>
+                                ) : (
+                                  <li>No hay estadísticas disponibles.</li>
+                                )}
+                              </ul>
+                              <p>Estadísticas de pesos de entrada:</p>
+                              <ul className="ml-4 list-disc">
+                                {inStats ? (
+                                  <>
+                                    <li>Mínimo: {formatNumber(inStats.min, 5)}</li>
+                                    <li>Máximo: {formatNumber(inStats.max, 5)}</li>
+                                    <li>Media: {formatNumber(inStats.mean, 5)}</li>
+                                    <li>Mediana: {formatNumber(inStats.median, 5)}</li>
+                                    <li>Varianza: {inStats.variance.toPrecision(5)}</li>
+                                  </>
+                                ) : (
+                                  <li>No hay estadísticas disponibles.</li>
+                                )}
+                              </ul>
+                            </div>
+                          );
+                        })()
+                      )}
+                      {/* Bias */}
+                      {modelInfo.biases?.[selectedNeuron.layerIndex]?.[selectedNeuron.neuronIndex] !== undefined && (
+                        <p>Bias: <code>{modelInfo.biases[selectedNeuron.layerIndex][selectedNeuron.neuronIndex]}</code></p>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </>
+          )}
         </>
       )}
     </div>

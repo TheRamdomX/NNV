@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  # ============ BACKEND (FastAPI + TensorFlow) ============
+  backend:
+    build:
+      context: ./Back
+      dockerfile: Dockerfile
+    container_name: nnv-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./Back:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - nnv-network
+
+  # ============ FRONTEND (React + Vite) ============
+  frontend:
+    build:
+      context: ./Front
+      dockerfile: Dockerfile
+    container_name: nnv-frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./Front:/app
+      - /app/node_modules  # Evita sobrescribir node_modules del contenedor
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - nnv-network
+
+networks:
+  nnv-network:
+    driver: bridge
